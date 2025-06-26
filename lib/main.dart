@@ -233,7 +233,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     // Handler per le richieste HTTP.
     handler(Request request) async {
       // Gestisce le richieste OPTIONS per il CORS.
-      if (request.method == 'OPTIONS') {
+      /*if (request.method == 'OPTIONS') {
         return Response.ok(
           '',
           headers: {
@@ -242,7 +242,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
             'Access-Control-Allow-Headers': 'Origin, Content-Type',
           },
         );
-      }
+      }*/
 
       final command = request.url.pathSegments.last;
       final now = DateTime.now();
@@ -338,10 +338,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
             'status': 'success',
             'command': command,
             'message': responseMessage,
-            'timestamp': now.toIso8601String(),
-            'current_url': await _webViewController.currentUrl(),
-            'kiosk_mode': await getKioskMode().then((mode) => mode.toString()),
-            'is_launcher': _isLauncherDefault,
+            'timestamp': now.toIso8601String()
           }),
           headers: {
             'Access-Control-Allow-Origin': '*',
@@ -476,7 +473,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
       };
       final response = await http.post(
         Uri.parse(_qrUrl!), // Usa l'URL dal QR code.
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Authorization': 'Bearer $_qrToken'},
         body: bodyData,
       );
 
@@ -487,6 +484,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
           if (_jwtToken != null && _jwtToken!.isNotEmpty) {
             await storage.write(key: 'jwtToken', value: _jwtToken);
             await storage.write(key: 'urlHome', value: _qrHome);
+            await storage.write(key: 'urlReg', value: _qrUrl);
             _addLog("Dispositivo registrato con successo. JWT Token salvato.");
 
             // Procedi allo stato WebView e Server.
