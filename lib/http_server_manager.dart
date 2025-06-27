@@ -179,6 +179,14 @@ class HttpServerManager {
               'is_launcher_default': deviceInfo['is_launcher_default'],
               'current_url': await _webViewController.currentUrl(),
               'jwt_token_present': deviceInfo['jwt_token_present'],
+              'battery' : jsonEncode({
+                'status': '',
+                'level': ''
+              }),
+              'wifi_status' : jsonEncode({
+                'status': '',
+                'signal': ''
+              }),
             });
             break;
           default:
