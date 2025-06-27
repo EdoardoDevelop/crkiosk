@@ -6,11 +6,12 @@ import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:kiosk_mode/kiosk_mode.dart';
 import 'package:webview_flutter/webview_flutter.dart';
-import 'package:shelf/shelf.dart';
-import 'package:shelf/shelf_io.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:uuid/uuid.dart';
+
+// Import the new HTTP server manager.
+import 'http_server_manager.dart';
 
 void main() {
   runApp(const App());
@@ -26,7 +27,7 @@ class App extends StatelessWidget {
   );
 }
 
-// Definisce gli stati del ciclo di vita dell'applicazione per una chiara gestione del flusso.
+/// Definisce gli stati del ciclo di vita dell'applicazione per una chiara gestione del flusso.
 enum AppLifecycleState {
   initial,
   qrScanning,
@@ -43,8 +44,9 @@ class HomeLauncherScreen extends StatefulWidget {
 }
 
 class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
-  //salta la configurazione con qr code e memorizza un token fittizio (utile in fase di debug)
+  // Salta la configurazione con QR code e memorizza un token fittizio (utile in fase di debug).
   final bool _skipQrConfig = true; // TODO: Cambiare a false per configurare con QR code.
+
   // Controller per la WebView.
   late final WebViewController _webViewController;
   // Indica se la WebView è stata inizializzata.
@@ -57,16 +59,20 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
   String? _correctPassword;
   // Indica se la WebView sta caricando una pagina.
   bool _isWebViewLoading = true;
-  // Istanza del server HTTP.
-  HttpServer? _server;
+
+  // Istanza del server HTTP manager.
+  HttpServerManager? _httpServerManager;
   // Indirizzo IP del server.
   String _serverIp = 'Indirizzo IP non disponibile';
   // Porta del server HTTP.
   final int _serverPort = 3636;
+  // Allowed origin per le richieste HTTP (CORS).
+  String? _allowedOrigin = '*';
   // Ultimo comando ricevuto dal server.
   String _lastCommand = 'Nessun comando ricevuto';
   // Timestamp dell'ultimo comando ricevuto.
   DateTime? _lastCommandTime;
+
   // Indica se l'app è impostata come launcher predefinito.
   bool _isLauncherDefault = false;
   // Controlla la visibilità del pannello di amministrazione.
@@ -104,9 +110,11 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     _addLog("Inizializzazione applicazione...");
     setState(() => _appState = AppLifecycleState.initial);
 
+    // Flag di debug per saltare la configurazione QR
     if (_skipQrConfig) {
       await storage.write(key: 'jwtToken', value: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ey');
-    }else{
+    } else {
+      // Se non si salta la configurazione, assicurati che il token fittizio venga rimosso se presente
       if (await storage.containsKey(key: 'jwtToken')) {
         if(await storage.read(key: 'jwtToken') == 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ey') {
           await storage.delete(key: 'jwtToken');
@@ -119,9 +127,9 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
       _addLog("JWT Token trovato. Caricamento WebView e avvio server.");
       await _loadUrlHome(); // Carica l'URL home prima di inizializzare la webview.
       _initWebView(); // Inizializza la WebView.
+      await _loadPassword(); // Carica la password di amministrazione.
+      await _loadAllowedOrigin(); // Carica l'allowed origin per CORS.
       await _startHttpServer(); // Avvia il server HTTP.
-      await _getLocalIp(); // Recupera l'indirizzo IP locale.
-      await _loadPassword(); // Carica la password.
       await _checkDefaultLauncher(); // Controlla se l'app è il launcher predefinito.
       setState(() {
         _isWebViewInitialized = true;
@@ -194,6 +202,17 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     _correctPassword ??= "123456";
   }
 
+  /// Carica l'allowed origin dalla memoria sicura.
+  Future<void> _loadAllowedOrigin() async {
+    final storedAllowedOrigin = await storage.read(key: 'allowedOrigin');
+    if (storedAllowedOrigin != null && storedAllowedOrigin.isNotEmpty) {
+      setState(() {
+        _allowedOrigin = storedAllowedOrigin;
+      });
+    }
+    _addLog("AllowedOrigin caricato: $_allowedOrigin");
+  }
+
   /// Inizializza il controller della WebView con le impostazioni desiderate e carica l'URL iniziale.
   void _initWebView() {
     _webViewController = WebViewController()
@@ -211,166 +230,56 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     _addLog("WebView inizializzata con URL: $_urlHome");
   }
 
-  /// Recupera l'indirizzo IP locale del dispositivo.
-  Future<void> _getLocalIp() async {
-    try {
-      final interfaces = await NetworkInterface.list();
-      for (var interface in interfaces) {
-        for (var addr in interface.addresses) {
-          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
-            setState(() => _serverIp = addr.address);
-            return;
-          }
-        }
-      }
-    } catch (e) {
-      _addLog('Errore nel recupero IP: $e');
-    }
-  }
-
-  /// Avvia un server HTTP locale per gestire i comandi remoti.
+  /// Avvia un server HTTP locale utilizzando l'HttpServerManager.
   Future<void> _startHttpServer() async {
-    // Handler per le richieste HTTP.
-    handler(Request request) async {
-      // Gestisce le richieste OPTIONS per il CORS.
-      /*if (request.method == 'OPTIONS') {
-        return Response.ok(
-          '',
-          headers: {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Origin, Content-Type',
-          },
-        );
-      }*/
-
-      final command = request.url.pathSegments.last;
-      final now = DateTime.now();
-
-      setState(() {
-        _lastCommand = command;
-        _lastCommandTime = now;
-      });
-
-      String responseMessage;
-
-      try {
-        // TODO: Logica per l'esecuzione dei comandi.
-        switch (command) {
-          case 'reload':
-            _webViewController.reload();
-            responseMessage = 'Pagina ricaricata con successo';
-            break;
-          case 'go-home':
-            await _webViewController.loadRequest(Uri.parse(_urlHome));
-            responseMessage = 'Tornato alla pagina iniziale';
-            break;
-          case 'kiosk-on':
-            final success = await startKioskMode();
-            _handleKioskStart(success);
-            responseMessage = success ? 'Modalità Kiosk attivata' : 'Fallito attivazione Kiosk';
-            break;
-          case 'kiosk-off':
-            final success = await stopKioskMode();
-            _handleKioskStop(success);
-            responseMessage = success ?? false ? 'Modalità Kiosk disattivata' : 'Fallito disattivazione Kiosk';
-            break;
-          case 'status':
-            final mode = await getKioskMode();
-            responseMessage = 'Stato attuale: $mode - Ultima pagina: ${await _webViewController.currentUrl()}';
-            break;
-          case 'change-pwd':
-            final body = await request.readAsString();
-            final jsonBody = jsonDecode(body);
-            final newPassword = jsonBody['password'] as String?;
-            if (newPassword == null || newPassword.isEmpty) {
-              responseMessage = 'Password non fornita o vuota';
-            } else {
-              await storage.write(key: 'password', value: newPassword);
-              setState(() => _correctPassword = newPassword);
-              responseMessage = 'Password cambiata con successo';
-            }
-            break;
-          case 'url-home':
-            final body = await request.readAsString();
-            final jsonBody = jsonDecode(body);
-            final newUrlHome = jsonBody['url'] as String?;
-            if (newUrlHome == null || newUrlHome.isEmpty || !Uri.tryParse(newUrlHome)!.isAbsolute) {
-              responseMessage = 'URL non fornito, vuoto o non valido.';
-            } else {
-              await storage.write(key: 'urlHome', value: newUrlHome);
-              setState(() {
-                _urlHome = newUrlHome;
-                _webViewController.loadRequest(Uri.parse(_urlHome)); // Ricarica la webview con il nuovo URL.
-              });
-              responseMessage = 'URL Home cambiato con successo a: $_urlHome';
-            }
-            break;
-          case 'redirect':
-            final body = await request.readAsString();
-            final jsonBody = jsonDecode(body);
-            final redirectUrl = jsonBody['url'] as String?;
-            if (redirectUrl == null || redirectUrl.isEmpty || !Uri.tryParse(redirectUrl)!.isAbsolute) {
-              responseMessage = 'URL non fornito, vuoto o non valido.';
-            } else {
-              await _webViewController.loadRequest(Uri.parse(redirectUrl));
-              responseMessage = 'Redirezione effettuata a: $redirectUrl';
-            }
-            break;
-          case 'device-info':
-            responseMessage = jsonEncode({
-              'device_id': _deviceId,
-              'ip_address': _serverIp,
-              'kiosk_mode': await getKioskMode().then((mode) => mode.toString()),
-              'is_launcher_default': _isLauncherDefault,
-              'current_url': await _webViewController.currentUrl(),
-              'jwt_token_present': _jwtToken != null,
-            });
-            break;
-          default:
-            responseMessage = 'Comando non riconosciuto: $command';
-        }
-
-        _addLog('[$now] Comando "$command" eseguito: $responseMessage');
-
-        return Response.ok(
-          jsonEncode({
-            'status': 'success',
-            'command': command,
-            'message': responseMessage,
-            'timestamp': now.toIso8601String()
-          }),
-          headers: {
-            'Access-Control-Allow-Origin': '*',
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Origin, Content-Type',
-          },
-        );
-      } catch (e) {
-        final errorMessage = 'Errore durante l\'esecuzione del comando: $e';
-        _addLog('[$now] $errorMessage');
-
-        return Response.internalServerError(
-          body: jsonEncode({
-            'status': 'error',
-            'command': command,
-            'message': errorMessage,
-            'timestamp': now.toIso8601String(),
-          }),
-          headers: {
-            'Access-Control-Allow-Origin': '*',
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Origin, Content-Type',
-          },
-        );
-      }
-    }
+    // Inizializza l'HTTP server manager se non è già stato fatto.
+    _httpServerManager ??= HttpServerManager(
+      webViewController: _webViewController,
+      storage: storage,
+      serverPort: _serverPort,
+      initialUrlHome: _urlHome,
+      initialAllowedOrigin: _allowedOrigin!,
+      addLog: _addLog,
+      handleKioskStart: _handleKioskStart,
+      handleKioskStop: _handleKioskStop,
+      onPasswordChanged: (newPassword) {
+        setState(() {
+          _correctPassword = newPassword;
+        });
+      },
+      onUrlHomeChanged: (newUrlHome) {
+        setState(() {
+          _urlHome = newUrlHome;
+        });
+      },
+      onAllowedOriginChanged: (newAllowedOrigin) {
+        setState(() {
+          _allowedOrigin = newAllowedOrigin;
+        });
+      },
+      onCommandExecuted: (command, timestamp) {
+        setState(() {
+          _lastCommand = command;
+          _lastCommandTime = timestamp;
+        });
+      },
+      onServerIpUpdated: (ipAddress) {
+        setState(() {
+          _serverIp = ipAddress;
+        });
+      },
+      getDeviceInfo: () {
+        return {
+          'device_id': _deviceId,
+          'kiosk_mode': KioskMode.disabled.toString(), // Questo dovrebbe essere aggiornato dinamicamente dal pacchetto kiosk_mode, placeholder per ora
+          'is_launcher_default': _isLauncherDefault,
+          'jwt_token_present': _jwtToken != null,
+        };
+      },
+    );
 
     try {
-      _server = await serve(handler, '0.0.0.0', _serverPort);
-      _addLog('Server in ascolto su http://$_serverIp:${_server!.port}');
+      await _httpServerManager!.start();
     } catch (e) {
       _addLog('Errore avvio server HTTP: $e');
       setState(() => _appState = AppLifecycleState.error); // Segnala un errore nello stato dell'app.
@@ -407,7 +316,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     }
   }
 
-  // TODO: Callback per la rilevazione di codici a barre/QR.
+  /// Callback per la rilevazione di codici a barre/QR.
   void _onBarcodeDetected(BarcodeCapture capture) async {
     if (_appState == AppLifecycleState.qrScanning && _isScanning) {
       final barcode = capture.barcodes.firstOrNull;
@@ -455,20 +364,20 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     });
   }
 
-  // TODO: Registra il dispositivo con un server remoto utilizzando i dati del QR code.
+  /// Registra il dispositivo con un server remoto utilizzando i dati del QR code.
   Future<void> _registerDevice() async {
     _addLog("Inizio registrazione dispositivo...");
-    await _getLocalIp(); // Assicura che l'IP locale sia disponibile.
-    await _generateDeviceId(); // Assicura che l'ID del dispositivo sia disponibile.
+    // Assicura che l'ID del dispositivo sia disponibile prima di procedere.
+    await _generateDeviceId();
 
     final finalDeviceId = _qrDeviceId ?? _deviceId; // Usa l'ID dal QR se presente, altrimenti quello generato.
 
     try {
       if (kDebugMode) {
-        print("Invio richiesta POST a: $_qrUrl con device ID: $finalDeviceId e JWT token: $_qrToken e IP address: $_serverIp");
+        print("Invio richiesta POST a: $_qrUrl con device ID: $finalDeviceId e JWT token: $_qrToken");
       }
       final Map<String, String> bodyData = {
-        'ipAddress': _serverIp,
+        'ipAddress': _serverIp, // Assicura che _serverIp sia aggiornato (lo farà HttpServerManager)
         'jwt_token': _qrToken!,
       };
       final response = await http.post(
@@ -480,26 +389,42 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
       if (response.statusCode == 200) {
         final responseBody = jsonDecode(response.body);
         if (responseBody['success'] == true) {
-          _jwtToken = _qrToken; // Salva il token JWT.
-          if (_jwtToken != null && _jwtToken!.isNotEmpty) {
-            await storage.write(key: 'jwtToken', value: _jwtToken);
-            await storage.write(key: 'urlHome', value: _qrHome);
-            await storage.write(key: 'urlReg', value: _qrUrl);
-            _addLog("Dispositivo registrato con successo. JWT Token salvato.");
+          final String? allowOriginHeader = response.headers['access-control-allow-origin'];
+          if (allowOriginHeader != null) {
+            if (kDebugMode) {
+              print("Server ha risposto con Access-Control-Allow-Origin: $allowOriginHeader");
+            }
 
-            // Procedi allo stato WebView e Server.
-            await _loadUrlHome();
-            _initWebView();
-            await _startHttpServer();
-            await _loadPassword();
-            await _checkDefaultLauncher();
-            setState(() {
-              _isWebViewInitialized = true;
-              _appState = AppLifecycleState.webViewAndServer;
-            });
+            _jwtToken = _qrToken; // Salva il token JWT.
+            if (_jwtToken != null && _jwtToken!.isNotEmpty) {
+              await storage.write(key: 'jwtToken', value: _jwtToken);
+              await storage.write(key: 'urlHome', value: _qrHome);
+              await storage.write(key: 'urlReg', value: _qrUrl);
+
+              if (allowOriginHeader != '*') { // Evita di sovrascrivere se è già '*'
+                setState(() {
+                  _allowedOrigin = allowOriginHeader;
+                });
+                await storage.write(key: 'allowedOrigin', value: _allowedOrigin);
+              }
+              _addLog("Dispositivo registrato con successo. JWT Token salvato.");
+
+              // Procedi allo stato WebView e Server.
+              await _loadUrlHome();
+              _initWebView();
+              await _startHttpServer();
+              await _loadPassword();
+              await _checkDefaultLauncher();
+              setState(() {
+                _isWebViewInitialized = true;
+                _appState = AppLifecycleState.webViewAndServer;
+              });
+            } else {
+              _addLog("Registrazione fallita: JWT Token non ricevuto dal server.");
+              setState(() => _appState = AppLifecycleState.error);
+            }
           } else {
-            _addLog("Registrazione fallita: JWT Token non ricevuto dal server.");
-            setState(() => _appState = AppLifecycleState.error);
+            _addLog("Server non ha specificato l'header Access-Control-Allow-Origin nella risposta.");
           }
         } else {
           if (kDebugMode) {
@@ -523,7 +448,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
 
   @override
   void dispose() {
-    _server?.close(); // Chiude il server HTTP.
+    _httpServerManager?.close(); // Chiude il server HTTP tramite il manager.
     _mobileScannerController.dispose(); // Dispone il controller dello scanner.
     super.dispose();
   }
@@ -579,7 +504,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     );
   }
 
-  // TODO: Widget per la visualizzazione dello scanner QR.
+  /// Widget per la visualizzazione dello scanner QR.
   Widget _buildQrScannerView() {
     return Column(
       children: <Widget>[
@@ -629,7 +554,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     );
   }
 
-  // TODO: Widget per la visualizzazione principale con WebView e pannello di controllo.
+  /// Widget per la visualizzazione principale con WebView e pannello di controllo.
   Widget _buildWebViewAndServerView() {
     return StreamBuilder<KioskMode>(
       stream: watchKioskMode(),
@@ -691,7 +616,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     );
   }
 
-  // TODO: Pannello di amministrazione con i pulsanti di controllo e le informazioni.
+  /// Pannello di amministrazione con i pulsanti di controllo e le informazioni.
   Widget _buildAdminPanel(bool isKioskEnabled) {
     return Positioned(
       bottom: 20,
@@ -777,7 +702,7 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
     );
   }
 
-  // TODO: Widget per la visualizzazione di un errore.
+  /// Widget per la visualizzazione di un errore.
   Widget _buildErrorView() {
     return Center(
       child: Padding(
