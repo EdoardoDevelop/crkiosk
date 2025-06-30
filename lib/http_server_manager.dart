@@ -1,10 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_signal_strength/flutter_signal_strength.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:kiosk_mode/kiosk_mode.dart';
+import 'package:battery_plus/battery_plus.dart'; // Import for battery
+import 'package:connectivity_plus/connectivity_plus.dart'; // Import for connectivity
+
 
 // Define typedefs for callbacks to communicate with the UI
 typedef LogCallback = void Function(String message);
@@ -39,7 +43,7 @@ class HttpServerManager {
   String _currentAllowedOrigin;
   String? _currentCorrectPassword; // La password di amministrazione corrente.
   String _currentServerIp = 'Indirizzo IP non disponibile'; // L'indirizzo IP locale del server.
-
+  final Battery _battery = Battery(); // Instantiate Battery
   /// Costruttore per HttpServerManager.
   ///
   /// Richiede vari controller, storage, porta, valori iniziali e callback
@@ -101,7 +105,7 @@ class HttpServerManager {
       // Notifica l'UI sull'ultimo comando eseguito e il suo timestamp.
       _onCommandExecuted(command, now);
 
-      String responseMessage;
+      dynamic responseMessage;
 
       try {
         // Gestisce i diversi comandi ricevuti dal server.
@@ -170,24 +174,56 @@ class HttpServerManager {
             }
             break;
           case 'device-info':
-          // Recupera le informazioni dinamiche del dispositivo dallo strato UI tramite callback.
-            final deviceInfo = _getDeviceInfo();
-            responseMessage = jsonEncode({
-              'device_id': deviceInfo['device_id'],
-              'ip_address': _currentServerIp, // Usa l'IP interno per la risposta.
+            // Recupera le informazioni dinamiche del dispositivo dallo strato UI tramite callback.
+            final deviceInfo = await _getDeviceInfo(); // Await the Future from _getDeviceInfo
+
+            // Get battery info
+            final batteryLevel = await _battery.batteryLevel;
+            final batteryState = await _battery.batteryState;
+            String batteryStatusString = '';
+            if (batteryState case BatteryState.full) {
+              batteryStatusString = 'Full';
+            } else if (batteryState case BatteryState.charging) {
+              batteryStatusString = 'Charging';
+            } else if (batteryState case BatteryState.discharging) {
+              batteryStatusString = 'Discharging';
+            } else if (batteryState case BatteryState.unknown) {
+              batteryStatusString = 'Unknown';
+            }
+
+            // Get WiFi info
+            final connectivityResult = await (Connectivity().checkConnectivity());
+            String wifiStatus = 'Disconnesso';
+            int wifiSignal = 0; // Placeholder for signal strength
+
+            if (connectivityResult.contains(ConnectivityResult.wifi)) {
+              wifiStatus = 'Connesso';
+              // To get signal strength, you'd typically need another package like network_info_plus
+              // For demonstration, we'll just indicate connection status.
+              // Example with network_info_plus (uncomment if you add it):
+              final flutterSignalStrength = FlutterSignalStrength();
+              final wifiSignalStrength = await flutterSignalStrength.getWifiSignalStrength();
+              //final wifiBSSID = await networkInfo.getWifiBSSID(); // Can be used to infer connection
+              //final wifiIP = await networkInfo.getWifiIP();
+
+              wifiSignal = wifiSignalStrength;
+
+            }
+            responseMessage = {
+              'ip_address': _currentServerIp,
               'kiosk_mode': deviceInfo['kiosk_mode'],
               'is_launcher_default': deviceInfo['is_launcher_default'],
               'current_url': await _webViewController.currentUrl(),
               'jwt_token_present': deviceInfo['jwt_token_present'],
-              'battery' : jsonEncode({
-                'status': '',
-                'level': ''
-              }),
-              'wifi_status' : jsonEncode({
-                'status': '',
-                'signal': ''
-              }),
-            });
+              'battery' : {
+                'status': batteryStatusString,
+                'level': batteryLevel,
+              },
+              'wifi' : {
+                'status': wifiStatus,
+                'signal': wifiSignal,
+              },
+            };
             break;
           default:
             responseMessage = 'Comando non riconosciuto: $command';
