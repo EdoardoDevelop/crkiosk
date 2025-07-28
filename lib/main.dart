@@ -284,14 +284,33 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
             responseMessage = 'URL Home cambiato con successo a: $_urlHome';
           }
         } else if (command == 'redirect') {
-          final body = await request.readAsString();
-          final jsonBody = jsonDecode(body);
+          final rawBodyFromJs = await request.readAsString();
+
+          final jsonBody = jsonDecode(rawBodyFromJs);
+
           final redirectUrl = jsonBody['url'] as String?;
+          final dataMap = (jsonBody['data'] as Map<String, dynamic>?) ?? {};
+          dataMap['jwt'] = _jwtToken;
+
           if (redirectUrl == null || redirectUrl.isEmpty || !Uri.tryParse(redirectUrl)!.isAbsolute) {
             responseMessage = 'URL non fornito, vuoto o non valido.';
           } else {
-            await _webViewController.loadRequest(Uri.parse(redirectUrl));
-            responseMessage = 'Redirezione effettuata a: $redirectUrl';
+            // Trasforma la mappa in una stringa 'url-encoded'
+            final String postData = dataMap.entries
+                .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value.toString())}')
+                .join('&');
+
+            await _webViewController.loadRequest(
+              Uri.parse(redirectUrl),
+              method: LoadRequestMethod.post,
+              // Imposta l'header per 'x-www-form-urlencoded'
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Authorization': 'Bearer $_jwtToken'
+              },
+              body: Uint8List.fromList(utf8.encode(postData)),
+            );
+            responseMessage = 'Redirezione effettuata a: $redirectUrl con dati form-urlencoded.';
           }
         } else if (command == 'device-info') {
           // Get battery info
