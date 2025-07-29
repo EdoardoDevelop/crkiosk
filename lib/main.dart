@@ -306,7 +306,6 @@ class _HomeLauncherScreenState extends State<HomeLauncherScreen> {
               // Imposta l'header per 'x-www-form-urlencoded'
               headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
-                'Authorization': 'Bearer $_jwtToken'
               },
               body: Uint8List.fromList(utf8.encode(postData)),
             );
